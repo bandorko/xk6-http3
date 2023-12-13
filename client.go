@@ -13,6 +13,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,13 +27,6 @@ import (
 	"go.k6.io/k6/lib/types"
 	"gopkg.in/guregu/null.v3"
 )
-
-func (c *Client) getMethodClosure(method string) func(url goja.Value, args ...goja.Value) (*Response, error) {
-	return func(url goja.Value, args ...goja.Value) (*Response, error) {
-		c.moduleInstance.wg.Add(1)
-		return c.Request(method, url, args...)
-	}
-}
 
 // ErrHTTPForbiddenInInitContext is used when a http requests was made in the init context
 var ErrHTTPForbiddenInInitContext = common.NewInitContextError("Making http requests in the init context is not supported")
@@ -82,14 +76,63 @@ func (c *Client) responseFromHTTPext(resp *httpext.Response) *Response {
 }
 
 func (c *Client) makeRequest(ctx context.Context, state *lib.State, preq *httpext.ParsedHTTPRequest) (*httpext.Response, error) {
-
-	resp, err := c.client.Do(preq.Req)
 	respReq := &httpext.Request{
 		Method:  preq.Req.Method,
 		URL:     preq.Req.URL.String(),
 		Cookies: stdCookiesToHTTPRequestCookies(preq.Req.Cookies()),
 		Headers: preq.Req.Header,
 	}
+
+	if preq.Body != nil {
+		// TODO: maybe hide this behind of flag in order for this to not happen for big post/puts?
+		// should we set this after the compression? what will be the point ?
+		respReq.Body = preq.Body.String()
+
+		if len(preq.Compressions) > 0 {
+			compressedBody, contentEncoding, err := compressBody(preq.Compressions, io.NopCloser(preq.Body))
+			if err != nil {
+				return nil, err
+			}
+			preq.Body = compressedBody
+
+			currentContentEncoding := preq.Req.Header.Get("Content-Encoding")
+			if currentContentEncoding == "" {
+				preq.Req.Header.Set("Content-Encoding", contentEncoding)
+			} else if currentContentEncoding != contentEncoding {
+				state.Logger.Warningf(
+					"There's a mismatch between the desired `compression` the manually set `Content-Encoding` header "+
+						"in the %s request for '%s', the custom header has precedence and won't be overwritten. "+
+						"This may result in invalid data being sent to the server.", preq.Req.Method, preq.Req.URL,
+				)
+			}
+		}
+
+		preq.Req.ContentLength = int64(preq.Body.Len()) // This will make Go set the content-length header
+		preq.Req.GetBody = func() (io.ReadCloser, error) {
+			//  using `Bytes()` should reuse the same buffer and as such help with the memory usage. We
+			//  should not be writing to it any way so there shouldn't be way to corrupt it (?)
+			return io.NopCloser(bytes.NewBuffer(preq.Body.Bytes())), nil
+		}
+		// as per the documentation using GetBody still requires setting the Body.
+		preq.Req.Body, _ = preq.Req.GetBody()
+	}
+
+	if contentLengthHeader := preq.Req.Header.Get("Content-Length"); contentLengthHeader != "" {
+		// The content-length header was set by the user, delete it (since Go
+		// will set it automatically) and warn if there were differences
+		preq.Req.Header.Del("Content-Length")
+		length, err := strconv.Atoi(contentLengthHeader)
+		if err != nil || preq.Req.ContentLength != int64(length) {
+			state.Logger.Warnf(
+				"The specified Content-Length header %q in the %s request for %s "+
+					"doesn't match the actual request body length of %d, so it will be ignored!",
+				contentLengthHeader, preq.Req.Method, preq.Req.URL, preq.Req.ContentLength,
+			)
+		}
+	}
+
+	resp, err := c.client.Do(preq.Req)
+
 	body, err := readResponseBody(c.moduleInstance.vu.State(), preq.ResponseType, resp, err)
 	if err != nil {
 		return nil, err
@@ -122,8 +165,6 @@ func (c *Client) makeRequest(ctx context.Context, state *lib.State, preq *httpex
 
 	return httpresp, nil
 }
-
-const responseDecompressionErrorCode uint32 = 1701
 
 // Matches non-compliant io.Closer implementations (e.g. zstd.Decoder)
 type ncloser interface {
@@ -583,4 +624,46 @@ func stdCookiesToHTTPRequestCookies(cookies []*http.Cookie) map[string][]*httpex
 			&httpext.HTTPRequestCookie{Name: cookie.Name, Value: cookie.Value})
 	}
 	return result
+}
+
+func compressBody(algos []httpext.CompressionType, body io.ReadCloser) (*bytes.Buffer, string, error) {
+	var contentEncoding string
+	var prevBuf io.Reader = body
+	var buf *bytes.Buffer
+	for _, compressionType := range algos {
+		if buf != nil {
+			prevBuf = buf
+		}
+		buf = new(bytes.Buffer)
+
+		if contentEncoding != "" {
+			contentEncoding += ", "
+		}
+		contentEncoding += compressionType.String()
+		var w io.WriteCloser
+		switch compressionType {
+		case httpext.CompressionTypeGzip:
+			w = gzip.NewWriter(buf)
+		case httpext.CompressionTypeDeflate:
+			w = zlib.NewWriter(buf)
+		case httpext.CompressionTypeZstd:
+			w, _ = zstd.NewWriter(buf)
+		case httpext.CompressionTypeBr:
+			w = brotli.NewWriter(buf)
+		default:
+			return nil, "", fmt.Errorf("unknown compressionType %s", compressionType)
+		}
+		// we don't close in defer because zlib will write it's checksum again if it closes twice :(
+		_, err := io.Copy(w, prevBuf)
+		if err != nil {
+			_ = w.Close()
+			return nil, "", err
+		}
+
+		if err = w.Close(); err != nil {
+			return nil, "", err
+		}
+	}
+
+	return buf, contentEncoding, body.Close()
 }

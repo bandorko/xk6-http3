@@ -62,16 +62,6 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		exports: rt.NewObject(),
 	}
 
-	mi.client = &Client{
-		moduleInstance: mi,
-		client: &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-			Transport: mi.createHTTP3RoundTripper(false),
-		},
-	}
-
 	go func() {
 		ev := <-ch
 		mi.wg.Wait()
@@ -85,41 +75,86 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		}
 	}
 
+	getMethodClosure := func(method string) func(url goja.Value, args ...goja.Value) (*Response, error) {
+		return func(url goja.Value, args ...goja.Value) (*Response, error) {
+			mi.wg.Add(1)
+			resp, err := mi.getClient().Request(method, url, args...)
+			if err != nil {
+				mi.wg.Done()
+			}
+			return resp, err
+		}
+	}
 	mustExport("get", func(url goja.Value, args ...goja.Value) (*Response, error) {
 		mi.wg.Add(1)
 		// http3.get(url, params) doesn't have a body argument, so we add undefined
 		// as the third argument to http.request(method, url, body, params)
 		args = append([]goja.Value{goja.Undefined()}, args...)
-		return mi.client.Request(http.MethodGet, url, args...)
+		resp, err := mi.getClient().Request(http.MethodGet, url, args...)
+		if err != nil {
+			mi.wg.Done()
+		}
+		return resp, err
 	})
 	mustExport("head", func(url goja.Value, args ...goja.Value) (*Response, error) {
 		mi.wg.Add(1)
 		// http3.head(url, params) doesn't have a body argument, so we add undefined
 		// as the third argument to http.request(method, url, body, params)
 		args = append([]goja.Value{goja.Undefined()}, args...)
-		return mi.client.Request(http.MethodHead, url, args...)
+		resp, err := mi.getClient().Request(http.MethodHead, url, args...)
+		if err != nil {
+			mi.wg.Done()
+		}
+		return resp, err
 	})
-	mustExport("post", mi.client.getMethodClosure(http.MethodPost))
-	mustExport("put", mi.client.getMethodClosure(http.MethodPut))
-	mustExport("patch", mi.client.getMethodClosure(http.MethodPatch))
-	mustExport("del", mi.client.getMethodClosure(http.MethodDelete))
-	mustExport("options", mi.client.getMethodClosure(http.MethodOptions))
-	mustExport("request", mi.client.Request)
+	mustExport("post", getMethodClosure(http.MethodPost))
+	mustExport("put", getMethodClosure(http.MethodPut))
+	mustExport("patch", getMethodClosure(http.MethodPatch))
+	mustExport("del", getMethodClosure(http.MethodDelete))
+	mustExport("options", getMethodClosure(http.MethodOptions))
+	mustExport("request", func(method string, url goja.Value, args ...goja.Value) (*Response, error) {
+		mi.wg.Add(1)
+		resp, err := mi.getClient().Request(method, url, args...)
+		if err != nil {
+			mi.wg.Done()
+		}
+		return resp, err
+	})
 	return mi
+}
+
+func (mi *ModuleInstance) getClient() *Client {
+	if mi.client == nil {
+		mi.client = &Client{
+			moduleInstance: mi,
+			client: &http.Client{
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+				Transport: mi.createHTTP3RoundTripper(mi.vu.State().TLSConfig.InsecureSkipVerify),
+			},
+		}
+	}
+	return mi.client
 }
 
 func (mi *ModuleInstance) createHTTP3RoundTripper(insecure bool) *quichttp3.RoundTripper {
 	qconf := quic.Config{
 
 		Tracer: func(ctx context.Context, p logging.Perspective, connID quic.ConnectionID) *logging.ConnectionTracer {
-			role := "server"
-			if p == logging.PerspectiveClient {
-				role = "client"
+			tracers := make([]*logging.ConnectionTracer, 0)
+			tracers = append(tracers, metrics.NewTracer(mi.vu, mi.metrics, mi.wg))
+			if os.Getenv("HTTP3_QLOG") == "1" {
+				role := "server"
+				if p == logging.PerspectiveClient {
+					role = "client"
+				}
+				filename := fmt.Sprintf("./log_%s_%s.qlog", connID, role)
+				f, _ := os.Create(filename)
+				// TODO: handle the error
+				tracers = append(tracers, qlog.NewConnectionTracer(f, p, connID))
 			}
-			filename := fmt.Sprintf("./log_%s_%s.qlog", connID, role)
-			f, _ := os.Create(filename)
-			// TODO: handle the error
-			return logging.NewMultiplexedConnectionTracer(metrics.NewTracer(mi.vu, mi.metrics, mi.wg), qlog.NewConnectionTracer(f, p, connID))
+			return logging.NewMultiplexedConnectionTracer(tracers...)
 		},
 	}
 

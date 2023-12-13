@@ -1,4 +1,4 @@
-package http3ext
+package http3
 
 import (
 	"context"
@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/bandorko/xk6-http3/metrics"
 	"github.com/dop251/goja"
 	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	quichttp3 "github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/logging"
+	"github.com/quic-go/quic-go/qlog"
 	"go.k6.io/k6/event"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
@@ -30,7 +32,7 @@ type (
 		wg      *sync.WaitGroup
 		vu      modules.VU
 		metrics *metrics.HTTP3Metrics
-		client  *http.Client
+		client  *Client
 		exports *goja.Object
 	}
 )
@@ -60,6 +62,16 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		exports: rt.NewObject(),
 	}
 
+	mi.client = &Client{
+		moduleInstance: mi,
+		client: &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			Transport: mi.createHTTP3RoundTripper(false),
+		},
+	}
+
 	go func() {
 		ev := <-ch
 		mi.wg.Wait()
@@ -73,44 +85,41 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		}
 	}
 
-	mustExport("get", func(url goja.Value, args ...goja.Value) (string, error) {
+	mustExport("get", func(url goja.Value, args ...goja.Value) (*Response, error) {
 		mi.wg.Add(1)
-		resp, err := mi.getClient().Get(url.String())
-		if err != nil {
-			return "", err
-		}
-		body := fmt.Sprintf("%#v", resp)
-		return body, nil
+		// http3.get(url, params) doesn't have a body argument, so we add undefined
+		// as the third argument to http.request(method, url, body, params)
+		args = append([]goja.Value{goja.Undefined()}, args...)
+		return mi.client.Request(http.MethodGet, url, args...)
 	})
+	mustExport("head", func(url goja.Value, args ...goja.Value) (*Response, error) {
+		mi.wg.Add(1)
+		// http3.head(url, params) doesn't have a body argument, so we add undefined
+		// as the third argument to http.request(method, url, body, params)
+		args = append([]goja.Value{goja.Undefined()}, args...)
+		return mi.client.Request(http.MethodHead, url, args...)
+	})
+	mustExport("post", mi.client.getMethodClosure(http.MethodPost))
+	mustExport("put", mi.client.getMethodClosure(http.MethodPut))
+	mustExport("patch", mi.client.getMethodClosure(http.MethodPatch))
+	mustExport("del", mi.client.getMethodClosure(http.MethodDelete))
+	mustExport("options", mi.client.getMethodClosure(http.MethodOptions))
+	mustExport("request", mi.client.Request)
 	return mi
 }
 
-func (mi *ModuleInstance) getClient() *http.Client {
-	if mi.client == nil {
-		mi.client = &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				fmt.Println("Redirect:", req.URL, via[0].URL)
-				return http.ErrUseLastResponse
-			},
-			Transport: mi.createHTTP3RoundTripper(false),
-		}
-	}
-	return mi.client
-}
-
-func (mi *ModuleInstance) createHTTP3RoundTripper(insecure bool) *http3.RoundTripper {
+func (mi *ModuleInstance) createHTTP3RoundTripper(insecure bool) *quichttp3.RoundTripper {
 	qconf := quic.Config{
 
 		Tracer: func(ctx context.Context, p logging.Perspective, connID quic.ConnectionID) *logging.ConnectionTracer {
-			/*role := "server"
+			role := "server"
 			if p == logging.PerspectiveClient {
 				role = "client"
 			}
 			filename := fmt.Sprintf("./log_%s_%s.qlog", connID, role)
-			f, err := os.Create(filename)
-			fmt.Println(err)
-			// handle the error*/
-			return logging.NewMultiplexedConnectionTracer(metrics.NewTracer(mi.vu, mi.metrics, mi.wg) /*, qlog.NewConnectionTracer(f, p, connID)*/)
+			f, _ := os.Create(filename)
+			// TODO: handle the error
+			return logging.NewMultiplexedConnectionTracer(metrics.NewTracer(mi.vu, mi.metrics, mi.wg), qlog.NewConnectionTracer(f, p, connID))
 		},
 	}
 
@@ -118,7 +127,7 @@ func (mi *ModuleInstance) createHTTP3RoundTripper(insecure bool) *http3.RoundTri
 	if err != nil {
 		log.Fatal(err)
 	}
-	roundTripper := &http3.RoundTripper{
+	roundTripper := &quichttp3.RoundTripper{
 		TLSClientConfig: &tls.Config{
 			RootCAs:            pool,
 			InsecureSkipVerify: insecure,

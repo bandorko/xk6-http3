@@ -1,4 +1,4 @@
-package metrics
+package http3
 
 import (
 	"net"
@@ -8,15 +8,14 @@ import (
 	"github.com/quic-go/quic-go/logging"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/metrics"
-	k6metrics "go.k6.io/k6/metrics"
 )
 
 type HTTP3Metrics struct {
-	HTTP3ReqDuration  *k6metrics.Metric
-	HTTP3ReqSending   *k6metrics.Metric
-	HTTP3ReqWaiting   *k6metrics.Metric
-	HTTP3ReqReceiving *k6metrics.Metric
-	HTTP3Reqs         *k6metrics.Metric
+	HTTP3ReqDuration  *metrics.Metric
+	HTTP3ReqSending   *metrics.Metric
+	HTTP3ReqWaiting   *metrics.Metric
+	HTTP3ReqReceiving *metrics.Metric
+	HTTP3Reqs         *metrics.Metric
 }
 
 const (
@@ -82,8 +81,8 @@ func (mh *metricHandler) sendMetrics(streamID int64) {
 	http3ReqWaiting := streamMetrics.responseStart.Sub(streamMetrics.requestFin)
 	http3ReqReceiving := streamMetrics.responseFin.Sub(streamMetrics.responseStart)
 
-	samples := k6metrics.ConnectedSamples{
-		Samples: []k6metrics.Sample{
+	samples := metrics.ConnectedSamples{
+		Samples: []metrics.Sample{
 			{
 				TimeSeries: metrics.TimeSeries{
 					Metric: mh.metrics.HTTP3ReqDuration,
@@ -91,7 +90,7 @@ func (mh *metricHandler) sendMetrics(streamID int64) {
 				},
 				Metadata: nil,
 				Time:     streamMetrics.responseFin,
-				Value:    k6metrics.D(http3ReqDuration),
+				Value:    metrics.D(http3ReqDuration),
 			},
 			{
 				TimeSeries: metrics.TimeSeries{
@@ -100,7 +99,7 @@ func (mh *metricHandler) sendMetrics(streamID int64) {
 				},
 				Metadata: nil,
 				Time:     streamMetrics.requestFin,
-				Value:    k6metrics.D(http3ReqSending),
+				Value:    metrics.D(http3ReqSending),
 			},
 			{
 				TimeSeries: metrics.TimeSeries{
@@ -109,7 +108,7 @@ func (mh *metricHandler) sendMetrics(streamID int64) {
 				},
 				Metadata: nil,
 				Time:     streamMetrics.responseStart,
-				Value:    k6metrics.D(http3ReqWaiting),
+				Value:    metrics.D(http3ReqWaiting),
 			},
 			{
 				TimeSeries: metrics.TimeSeries{
@@ -118,7 +117,7 @@ func (mh *metricHandler) sendMetrics(streamID int64) {
 				},
 				Metadata: nil,
 				Time:     streamMetrics.responseFin,
-				Value:    k6metrics.D(http3ReqReceiving),
+				Value:    metrics.D(http3ReqReceiving),
 			},
 			{
 				TimeSeries: metrics.TimeSeries{
@@ -192,7 +191,7 @@ func (mh *metricHandler) handleFramesSent(frames []logging.Frame) {
 
 func (mh *metricHandler) PacketReceived(bc logging.ByteCount, f []logging.Frame) {
 	mh.handleFramesReceived(f)
-	sample := k6metrics.Sample{
+	sample := metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: mh.vu.State().BuiltinMetrics.DataReceived,
 		},
@@ -204,7 +203,7 @@ func (mh *metricHandler) PacketReceived(bc logging.ByteCount, f []logging.Frame)
 
 func (mh *metricHandler) PacketSent(bc logging.ByteCount, f []logging.Frame) {
 	mh.handleFramesSent(f)
-	sample := k6metrics.Sample{
+	sample := metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: mh.vu.State().BuiltinMetrics.DataSent,
 		},

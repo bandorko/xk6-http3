@@ -10,7 +10,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/bandorko/xk6-http3/metrics"
 	"github.com/dop251/goja"
 	"github.com/quic-go/quic-go"
 	quichttp3 "github.com/quic-go/quic-go/http3"
@@ -31,7 +30,7 @@ type (
 	ModuleInstance struct {
 		wg      *sync.WaitGroup
 		vu      modules.VU
-		metrics *metrics.HTTP3Metrics
+		metrics *HTTP3Metrics
 		client  *Client
 		exports *goja.Object
 	}
@@ -50,7 +49,7 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	rt := vu.Runtime()
 	sub, ch := vu.Events().Global.Subscribe(event.TestEnd)
 
-	metrics, err := metrics.RegisterMetrics(vu)
+	metrics, err := RegisterMetrics(vu)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -143,7 +142,7 @@ func (mi *ModuleInstance) createHTTP3RoundTripper(insecure bool) *quichttp3.Roun
 
 		Tracer: func(ctx context.Context, p logging.Perspective, connID quic.ConnectionID) *logging.ConnectionTracer {
 			tracers := make([]*logging.ConnectionTracer, 0)
-			tracers = append(tracers, metrics.NewTracer(mi.vu, mi.metrics, mi.wg))
+			tracers = append(tracers, NewTracer(mi.vu, mi.metrics, mi.wg))
 			if os.Getenv("HTTP3_QLOG") == "1" {
 				role := "server"
 				if p == logging.PerspectiveClient {

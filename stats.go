@@ -2,7 +2,6 @@ package http3
 
 import (
 	"net"
-	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go/logging"
@@ -35,7 +34,6 @@ type streamMetrics struct {
 	sentBytes     int
 }
 type metricHandler struct {
-	wg      *sync.WaitGroup
 	vu      modules.VU
 	metrics *HTTP3Metrics
 	streams map[int64]*streamMetrics
@@ -130,7 +128,6 @@ func (mh *metricHandler) sendMetrics(streamID int64) {
 			},
 		}}
 	mh.vu.State().Samples <- samples
-	mh.wg.Done()
 }
 
 func (mh *metricHandler) ConnectionStarted(t time.Time) {
@@ -213,9 +210,8 @@ func (mh *metricHandler) PacketSent(bc logging.ByteCount, f []logging.Frame) {
 	metrics.PushIfNotDone(mh.vu.Context(), mh.vu.State().Samples, sample)
 }
 
-func NewTracer(vu modules.VU, http3Metrics *HTTP3Metrics, wg *sync.WaitGroup) *logging.ConnectionTracer {
+func NewTracer(vu modules.VU, http3Metrics *HTTP3Metrics) *logging.ConnectionTracer {
 	mh := &metricHandler{
-		wg:      wg,
 		vu:      vu,
 		metrics: http3Metrics,
 		streams: make(map[int64]*streamMetrics),

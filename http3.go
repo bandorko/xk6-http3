@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 
 	"github.com/dop251/goja"
 	"github.com/quic-go/quic-go"
@@ -28,7 +27,6 @@ type (
 	RootModule struct{}
 
 	ModuleInstance struct {
-		wg      *sync.WaitGroup
 		vu      modules.VU
 		metrics *HTTP3Metrics
 		client  *Client
@@ -56,14 +54,15 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 
 	mi := &ModuleInstance{
 		vu:      vu,
-		wg:      &sync.WaitGroup{},
 		metrics: metrics,
 		exports: rt.NewObject(),
 	}
 
 	go func() {
 		ev := <-ch
-		mi.wg.Wait()
+		if mi.client != nil {
+			mi.client.client.Transport.(*quichttp3.RoundTripper).Close()
+		}
 		ev.Done()
 		vu.Events().Global.Unsubscribe(sub)
 	}()
@@ -76,35 +75,20 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 
 	getMethodClosure := func(method string) func(url goja.Value, args ...goja.Value) (*Response, error) {
 		return func(url goja.Value, args ...goja.Value) (*Response, error) {
-			mi.wg.Add(1)
-			resp, err := mi.getClient().Request(method, url, args...)
-			if err != nil {
-				mi.wg.Done()
-			}
-			return resp, err
+			return mi.getClient().Request(method, url, args...)
 		}
 	}
 	mustExport("get", func(url goja.Value, args ...goja.Value) (*Response, error) {
-		mi.wg.Add(1)
 		// http3.get(url, params) doesn't have a body argument, so we add undefined
 		// as the third argument to http.request(method, url, body, params)
 		args = append([]goja.Value{goja.Undefined()}, args...)
-		resp, err := mi.getClient().Request(http.MethodGet, url, args...)
-		if err != nil {
-			mi.wg.Done()
-		}
-		return resp, err
+		return mi.getClient().Request(http.MethodGet, url, args...)
 	})
 	mustExport("head", func(url goja.Value, args ...goja.Value) (*Response, error) {
-		mi.wg.Add(1)
-		// http3.head(url, params) doesn't have a body argument, so we add undefined
+		// http3.head(url, onStreamCompletedImplparams) doesn't have a body argument, so we add undefined
 		// as the third argument to http.request(method, url, body, params)
 		args = append([]goja.Value{goja.Undefined()}, args...)
-		resp, err := mi.getClient().Request(http.MethodHead, url, args...)
-		if err != nil {
-			mi.wg.Done()
-		}
-		return resp, err
+		return mi.getClient().Request(http.MethodHead, url, args...)
 	})
 	mustExport("post", getMethodClosure(http.MethodPost))
 	mustExport("put", getMethodClosure(http.MethodPut))
@@ -112,12 +96,7 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	mustExport("del", getMethodClosure(http.MethodDelete))
 	mustExport("options", getMethodClosure(http.MethodOptions))
 	mustExport("request", func(method string, url goja.Value, args ...goja.Value) (*Response, error) {
-		mi.wg.Add(1)
-		resp, err := mi.getClient().Request(method, url, args...)
-		if err != nil {
-			mi.wg.Done()
-		}
-		return resp, err
+		return mi.getClient().Request(method, url, args...)
 	})
 	return mi
 }
@@ -142,7 +121,7 @@ func (mi *ModuleInstance) createHTTP3RoundTripper(insecure bool) *quichttp3.Roun
 
 		Tracer: func(ctx context.Context, p logging.Perspective, connID quic.ConnectionID) *logging.ConnectionTracer {
 			tracers := make([]*logging.ConnectionTracer, 0)
-			tracers = append(tracers, NewTracer(mi.vu, mi.metrics, mi.wg))
+			tracers = append(tracers, NewTracer(mi.vu, mi.metrics))
 			if os.Getenv("HTTP3_QLOG") == "1" {
 				role := "server"
 				if p == logging.PerspectiveClient {
